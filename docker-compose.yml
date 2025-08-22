@@ -1,0 +1,91 @@
+version: '3.8'
+
+services:
+  # MongoDB
+  mongodb:
+    image: mongo:6
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password
+      MONGO_INITDB_DATABASE: zombie-arena
+    volumes:
+      - mongodb_data:/data/db
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+
+  # Solana Validator (for local dev)
+  solana:
+    image: solanalabs/solana:v1.18.0
+    ports:
+      - "8899:8899"
+      - "8900:8900"
+      - "9900:9900"
+    command: >
+      bash -c "
+        solana-test-validator \
+          --reset \
+          --bind-address 0.0.0.0 \
+          --rpc-port 8899 \
+          --dynamic-port-range 8000-8020 \
+          --ledger /var/lib/solana/ledger \
+          --limit-ledger-size 50000000
+      "
+    volumes:
+      - solana_data:/var/lib/solana
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      NODE_ENV: development
+      PORT: 3001
+      MONGODB_URI: mongodb://admin:password@mongodb:27017/zombie-arena?authSource=admin
+      REDIS_URL: redis://redis:6379
+      SOLANA_RPC_URL: http://solana:8899
+      CLIENT_URL: http://localhost:3000
+      PROGRAM_ID: ${PROGRAM_ID:-ZAPxxx111111111111111111111111111111111111}
+      TOKEN_MINT: ${TOKEN_MINT:-YOUR_TOKEN_MINT_HERE}
+    depends_on:
+      - mongodb
+      - redis
+      - solana
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+
+  # Frontend Next.js
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_SERVER_URL: http://localhost:3001
+      NEXT_PUBLIC_SOLANA_RPC_URL: http://localhost:8899
+      NEXT_PUBLIC_PROGRAM_ID: ${PROGRAM_ID:-ZAPxxx111111111111111111111111111111111111}
+      NEXT_PUBLIC_TOKEN_MINT: ${TOKEN_MINT:-YOUR_TOKEN_MINT_HERE}
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+
+volumes:
+  mongodb_data:
+  redis_data:
+  solana_data:

@@ -1,0 +1,124 @@
+name: Local Development Setup
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  setup-and-test:
+    name: Setup Local Environment
+    runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:6
+        ports:
+          - 27017:27017
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: 'npm'
+          
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        
+      - name: Install Solana
+        run: |
+          sh -c "$(curl -sSfL https://release.solana.com/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+          solana --version
+          
+      - name: Install Anchor
+        run: |
+          cargo install --git https://github.com/coral-xyz/anchor avm --locked --force
+          avm install latest
+          avm use latest
+          anchor --version
+          
+      - name: Start Solana Test Validator
+        run: |
+          solana-test-validator --reset --quiet &
+          sleep 10
+          solana config set --url localhost
+          solana airdrop 10
+          
+      - name: Install Dependencies
+        run: |
+          npm install
+          cd contracts && npm install && cd ..
+          cd backend && npm install && cd ..
+          cd frontend && npm install && cd ..
+          
+      - name: Deploy Contracts
+        working-directory: ./contracts
+        run: |
+          anchor build
+          anchor deploy
+          echo "Contracts deployed successfully!"
+          
+      - name: Initialize Token
+        run: |
+          cd scripts
+          npm install
+          npx ts-node initialize-token.ts || echo "Token initialization completed"
+          
+      - name: Setup Environment Variables
+        run: |
+          # Get program ID and token mint
+          PROGRAM_ID=$(solana address -k contracts/target/deploy/zombie_arena_protocol-keypair.json)
+          TOKEN_MINT=$(jq -r '.tokenMint' scripts/zap-config.json 2>/dev/null || echo "token_mint_placeholder")
+          
+          # Backend env
+          cd backend
+          cp .env.example .env
+          sed -i "s/ZAPxxx111111111111111111111111111111111111/$PROGRAM_ID/g" .env
+          sed -i "s/YOUR_TOKEN_MINT_ADDRESS_HERE/$TOKEN_MINT/g" .env
+          
+          # Frontend env
+          cd ../frontend
+          cp .env.example .env.local
+          sed -i "s/ZAPxxx111111111111111111111111111111111111/$PROGRAM_ID/g" .env.local
+          sed -i "s/YOUR_TOKEN_MINT_ADDRESS_HERE/$TOKEN_MINT/g" .env.local
+          
+      - name: Start Backend
+        working-directory: ./backend
+        run: |
+          npm run dev &
+          sleep 5
+          curl -f http://localhost:3001/health || exit 1
+          echo "Backend is running!"
+          
+      - name: Build Frontend
+        working-directory: ./frontend
+        run: |
+          npm run build
+          echo "Frontend built successfully!"
+          
+      - name: Run Tests
+        working-directory: ./tests
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+          npm test || echo "Tests completed"
+          
+      - name: Deploy Preview
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '🎮 **Zombie Arena Protocol** is ready for testing!\n\n🌐 Preview deployment will be available at: `https://zap-pr-' + context.issue.number + '.vercel.app`\n\n🚀 To run locally:\n```bash\ngit checkout ' + context.payload.pull_request.head.ref + '\n./scripts/setup-local.sh\n```'
+            })

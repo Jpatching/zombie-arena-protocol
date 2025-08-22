@@ -1,0 +1,27 @@
+{
+  "name": "zombie-arena-protocol",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Solana-based crypto zombie survival game",
+  "workspaces": [
+    "frontend",
+    "contracts",
+    "backend",
+    "game-engine",
+    "tests"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=frontend & npm run dev --workspace=backend",
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces",
+    "deploy:contracts": "npm run deploy --workspace=contracts",
+    "test:playwright": "npm run test --workspace=tests"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

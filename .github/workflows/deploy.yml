@@ -1,0 +1,174 @@
+name: Deploy Zombie Arena Protocol
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  SOLANA_CLI_VERSION: 1.18.0
+  ANCHOR_VERSION: 0.30.1
+  NODE_VERSION: 18
+
+jobs:
+  deploy-contracts:
+    name: Deploy Smart Contracts
+    runs-on: ubuntu-latest
+    outputs:
+      program-id: ${{ steps.deploy.outputs.program-id }}
+      token-mint: ${{ steps.deploy.outputs.token-mint }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        
+      - name: Install Solana
+        run: |
+          sh -c "$(curl -sSfL https://release.solana.com/v${{ env.SOLANA_CLI_VERSION }}/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+          
+      - name: Install Anchor
+        run: |
+          cargo install --git https://github.com/coral-xyz/anchor avm --locked --force
+          avm install ${{ env.ANCHOR_VERSION }}
+          avm use ${{ env.ANCHOR_VERSION }}
+          
+      - name: Setup Wallet
+        run: |
+          echo "${{ secrets.DEPLOY_WALLET }}" > wallet.json
+          solana config set --keypair wallet.json
+          solana config set --url ${{ secrets.SOLANA_RPC_URL }}
+          
+      - name: Build and Deploy Contracts
+        id: deploy
+        working-directory: ./contracts
+        run: |
+          anchor build
+          PROGRAM_ID=$(solana address -k target/deploy/zombie_arena_protocol-keypair.json)
+          echo "program-id=$PROGRAM_ID" >> $GITHUB_OUTPUT
+          
+          # Deploy only if not already deployed
+          if ! solana program show $PROGRAM_ID 2>/dev/null; then
+            anchor deploy --provider.cluster mainnet
+          fi
+          
+          # Initialize token if needed
+          if [ ! -f "../token-mint.json" ]; then
+            cd ../scripts
+            npm install
+            npm run initialize-token
+            TOKEN_MINT=$(jq -r '.tokenMint' zap-config.json)
+            echo "token-mint=$TOKEN_MINT" >> $GITHUB_OUTPUT
+          fi
+
+  deploy-backend:
+    name: Deploy Backend to Railway
+    runs-on: ubuntu-latest
+    needs: deploy-contracts
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Railway
+        run: npm install -g @railway/cli
+        
+      - name: Deploy to Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          cd backend
+          railway up --environment production \
+            -v SOLANA_RPC_URL=${{ secrets.SOLANA_RPC_URL }} \
+            -v PROGRAM_ID=${{ needs.deploy-contracts.outputs.program-id }} \
+            -v TOKEN_MINT=${{ needs.deploy-contracts.outputs.token-mint }} \
+            -v MONGODB_URI=${{ secrets.MONGODB_URI }} \
+            -v REDIS_URL=${{ secrets.REDIS_URL }}
+
+  deploy-frontend:
+    name: Deploy Frontend to Vercel
+    runs-on: ubuntu-latest
+    needs: [deploy-contracts, deploy-backend]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          
+      - name: Install Dependencies
+        working-directory: ./frontend
+        run: npm ci
+        
+      - name: Build Frontend
+        working-directory: ./frontend
+        env:
+          NEXT_PUBLIC_SOLANA_RPC_URL: ${{ secrets.SOLANA_RPC_URL }}
+          NEXT_PUBLIC_PROGRAM_ID: ${{ needs.deploy-contracts.outputs.program-id }}
+          NEXT_PUBLIC_TOKEN_MINT: ${{ needs.deploy-contracts.outputs.token-mint }}
+          NEXT_PUBLIC_SERVER_URL: ${{ secrets.BACKEND_URL }}
+        run: npm run build
+        
+      - name: Deploy to Vercel
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-args: '--prod'
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          working-directory: ./frontend
+
+  launch-on-pumpfun:
+    name: Launch on Pump.fun
+    runs-on: ubuntu-latest
+    needs: [deploy-contracts, deploy-frontend]
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Prepare Launch Assets
+        run: |
+          echo "Token is ready for Pump.fun launch!"
+          echo "Token Mint: ${{ needs.deploy-contracts.outputs.token-mint }}"
+          echo "Program ID: ${{ needs.deploy-contracts.outputs.program-id }}"
+          echo "Frontend URL: https://zombiearena.io"
+          echo ""
+          echo "Next steps:"
+          echo "1. Go to https://pump.fun/create"
+          echo "2. Connect wallet"
+          echo "3. Use token mint: ${{ needs.deploy-contracts.outputs.token-mint }}"
+          echo "4. Set supply: 1,000,000,000"
+          echo "5. Enable fair launch"
+          echo "6. Launch!"
+
+  run-tests:
+    name: Run E2E Tests
+    runs-on: ubuntu-latest
+    needs: deploy-frontend
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          
+      - name: Install Dependencies
+        working-directory: ./tests
+        run: |
+          npm ci
+          npx playwright install --with-deps
+          
+      - name: Run Playwright Tests
+        working-directory: ./tests
+        env:
+          BASE_URL: ${{ secrets.FRONTEND_URL }}
+        run: npm test
+        
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: tests/playwright-report/
+          retention-days: 30
