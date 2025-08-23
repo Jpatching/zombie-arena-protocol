@@ -46,3 +46,4 @@ test-results/
 # Game assets cache
 game-engine/cache/
 game-engine/temp/
+.vercel
